@@ -2,7 +2,7 @@
 
 An ID-verified smart door. An iPhone app built on the **Credence ID Tap2iD SDK** verifies a mobile driver's license (ISO/IEC 18013-5 mDL) presented from a wallet over QR code and Bluetooth, checks that the holder is over 21, and tells an **ESP32 touchscreen gate** to unlock or stay locked.
 
-The gate never learns who you are. With the Age Check profile, the wallet shares only the over-21 answer.
+The gate never learns your name, address, or birth date. With the Age Check profile, the wallet shares only three items: over 21, a photo to match the holder, and the issuing authority.
 
 ## How it works
 
