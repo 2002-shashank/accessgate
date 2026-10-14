@@ -167,6 +167,19 @@ struct ResultView: View {
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
 
+                if let data = outcome.portrait, let image = UIImage(data: data) {
+                    VStack(spacing: 6) {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 110, height: 110)
+                            .clipShape(RoundedRectangle(cornerRadius: 16))
+                        Text("Compare with the person at the door")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 if !outcome.details.isEmpty {
                     VStack(alignment: .leading, spacing: 12) {
                         ForEach(outcome.details, id: \.label) { row in

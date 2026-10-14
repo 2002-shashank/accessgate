@@ -4,6 +4,7 @@
 
 import Foundation
 import Combine
+import UIKit
 @preconcurrency import Tap2iDVerifierSDK
 
 // MARK: - Policy
@@ -36,6 +37,7 @@ nonisolated struct VerificationOutcome: Equatable, Sendable {
     let details: [DetailRow]
     let checks: [DetailRow]      // security checks reported by the SDK
     let technical: [DetailRow]   // every simple field returned, for troubleshooting
+    let portrait: Data?          // holder photo (PNG), if the profile requests it
     let rawStatus: String
 }
 
@@ -201,6 +203,7 @@ nonisolated enum ResultParser {
                                        details: [],
                                        checks: [],
                                        technical: [],
+                                       portrait: nil,
                                        rawStatus: "none")
         }
 
@@ -208,10 +211,23 @@ nonisolated enum ResultParser {
         var attributes: [String: Any] = [:]
         collect(result, into: &attributes, depth: 0)
 
+        // The SDK returns two maps per namespace:
+        //   attributes               -> the actual values (age_over_21, issuing_authority, portrait)
+        //   requestedAttributeStatus -> whether each requested element was returned and valid
+        // The generic walk above can mix them up, so read both explicitly and let the
+        // real values win.
+        let elementValues = dictionary(labeled: "attributes", in: result)
+        let elementStatus = dictionary(labeled: "requestedAttributeStatus", in: result)
+        for (key, value) in elementValues {
+            if let v = unwrap(value), isLeaf(v) { attributes[key] = v }
+        }
+        var portraitPNG: Data?
+        if let image = elementValues["portrait"].flatMap({ unwrap($0) }) as? UIImage {
+            portraitPNG = image.pngData()
+        }
+        let sdkErrors = strings(labeled: "errors", in: result)
+
         // Printed to the Xcode console to help tune the policy during testing.
-        print("[AccessGate] ===== FULL RESULT START =====")
-        dump(result, maxDepth: 8, maxItems: 400)
-        print("[AccessGate] ===== FULL RESULT END =====")
         print("[AccessGate] status = \(rawStatus)")
         for key in attributes.keys.sorted() where key != "portrait" {
             print("[AccessGate]   \(key) = \(attributes[key]!)")
@@ -255,11 +271,13 @@ nonisolated enum ResultParser {
             statusOK = cryptoOK && status.contains("success")
         }
 
-        // 3. Is the holder over 21?
+        // 3. Is the holder over 21? Use the element VALUE, and only if the SDK
+        //    reports that element as returned and valid.
         var ageOK: Bool?
-        if let value = attributes["age_over_21"] {
+        let ageElementValid = (elementStatus["age_over_21"].flatMap { unwrap($0) } as? Bool) ?? true
+        if let value = elementValues["age_over_21"].flatMap({ unwrap($0) }), ageElementValid {
             ageOK = (value as? Bool) ?? ("\(value)".lowercased() == "true")
-        } else if let dob = attributes["birth_date"], let years = age(from: dob) {
+        } else if let dob = elementValues["birth_date"].flatMap({ unwrap($0) }), let years = age(from: dob) {
             ageOK = years >= 21
         }
 
@@ -286,7 +304,7 @@ nonisolated enum ResultParser {
         if passed && usedTestIssuer {
             headline = "Genuine test credential. Test issuer accepted (development mode)."
         } else if passed {
-            headline = name.isEmpty ? "Credential verified. Only the over-21 answer was shared."
+            headline = name.isEmpty ? "Credential verified. No name, address, or birth date was shared."
                                     : "Credential verified for \(name)."
         } else if denyReason == "Issuer not trusted" {
             headline = "The ID is genuine, but its issuer is not on the trusted list."
@@ -299,6 +317,7 @@ nonisolated enum ResultParser {
         let technical = attributes.keys.sorted()
             .filter { $0 != "portrait" }
             .map { DetailRow(label: $0, value: "\(attributes[$0]!)") }
+            + sdkErrors.enumerated().map { DetailRow(label: "SDK note \($0.offset + 1)", value: $0.element) }
             + [DetailRow(label: "status", value: rawStatus)]
 
         return VerificationOutcome(passed: passed,
@@ -308,6 +327,7 @@ nonisolated enum ResultParser {
                                    details: detailRows(from: attributes),
                                    checks: checks,
                                    technical: technical,
+                                   portrait: portraitPNG,
                                    rawStatus: rawStatus)
     }
 
@@ -334,7 +354,8 @@ nonisolated enum ResultParser {
         ("family_name", "Last name"),
         ("birth_date", "Date of birth"),
         ("age_over_21", "Over 21"),
-        ("issuerDistinguishedName", "Issued by"),
+        ("issuing_authority", "Issuing authority"),
+        ("issuerDistinguishedName", "Signing certificate"),
         ("expiry_date", "Expires"),
         ("document_number", "Document no.")
     ]
@@ -351,6 +372,38 @@ nonisolated enum ResultParser {
             }
             return DetailRow(label: field.label, value: text)
         }
+    }
+
+    /// Finds the first dictionary property with this label anywhere in the result.
+    private static func dictionary(labeled label: String, in input: Any, depth: Int = 0) -> [String: Any] {
+        guard depth < 12, let value = unwrap(input) else { return [:] }
+        for child in Mirror(reflecting: value).children {
+            if child.label == label, let dict = unwrap(child.value) {
+                let mirror = Mirror(reflecting: dict)
+                guard mirror.displayStyle == .dictionary else { continue }
+                var out: [String: Any] = [:]
+                for pair in mirror.children {
+                    let parts = Array(Mirror(reflecting: pair.value).children)
+                    guard parts.count == 2 else { continue }
+                    out["\(unwrap(parts[0].value) ?? "")"] = parts[1].value
+                }
+                return out
+            }
+            let found = dictionary(labeled: label, in: child.value, depth: depth + 1)
+            if !found.isEmpty { return found }
+        }
+        return [:]
+    }
+
+    /// Finds the first array-of-strings property with this label (e.g. SDK error notes).
+    private static func strings(labeled label: String, in input: Any, depth: Int = 0) -> [String] {
+        guard depth < 12, let value = unwrap(input) else { return [] }
+        for child in Mirror(reflecting: value).children {
+            if child.label == label, let list = unwrap(child.value) as? [String] { return list }
+            let found = strings(labeled: label, in: child.value, depth: depth + 1)
+            if !found.isEmpty { return found }
+        }
+        return []
     }
 
     private static func commonName(from dn: String) -> String {
